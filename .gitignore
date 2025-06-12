@@ -172,3 +172,15 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+*.bin
+*.pt
+hub
+datasets
+modules
+archive
+*.sh
+tiny*
+temp
+hf_dataset
+data
+archive
