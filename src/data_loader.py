@@ -5,6 +5,7 @@ from tqdm.auto import tqdm
 from datasets import load_dataset
 import tiktoken
 import torch 
+import statistics
 device = "cuda" if torch.cuda.is_available() else "cpu"
 device_type = 'cuda' if 'cuda' in device else 'cpu'
 enc = tiktoken.get_encoding("gpt2")
@@ -67,10 +68,27 @@ class YelpFoodBusinessReviewsDataset:
             x, y = x.to(device), y.to(device)
         return x, y
         
-        return x, y
 if __name__ == "__main__":
 
     yelp_food_business_review_dataset_hf = load_dataset("hasnat79/yelp_food_business_review_dataset_2M")
+    print(yelp_food_business_review_dataset_hf)
+    # calculate average word length in the dataset
+    for split in yelp_food_business_review_dataset_hf.keys():
+        lengths = []
+        for review in yelp_food_business_review_dataset_hf[split]:
+            word_count = len(review['text'].split())
+            lengths.append(word_count)
+        
+        if lengths:
+            mean_length = sum(lengths) / len(lengths)
+            median_length = statistics.median(lengths)
+            print(f"Split: {split}")
+            print(f"  Mean review length: {mean_length:.2f} words") # train: 100 words, , test: 100 words
+            print(f"  Median review length: {median_length} words") # train: 71 words, test: 71 words
+        
+
+
+    # find average length of the reviews
 
     yelp_food_review_dataset = YelpFoodBusinessReviewsDataset(yelp_food_business_review_dataset_hf, data_dir="../data/yelp_food_business_review_dataset")
     x, y = yelp_food_review_dataset.get_batch('train', batch_size=1, block_size=128)
