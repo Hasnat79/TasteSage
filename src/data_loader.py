@@ -9,6 +9,13 @@ import statistics
 device = "cuda" if torch.cuda.is_available() else "cpu"
 device_type = 'cuda' if 'cuda' in device else 'cpu'
 enc = tiktoken.get_encoding("gpt2")
+# Print the EOS token for the GPT-2 tokenizer
+eos_token = enc.encode_single_token("<|endoftext|>")
+print(f"GPT-2 EOS token ID: {eos_token}")
+
+# exit()
+
+
 def process(example):
         # enc = tiktoken.get_encoding("gpt2")
         text = example['text']+" Stars: "+ str(example['stars']) # Append stars to the text
@@ -16,10 +23,10 @@ def process(example):
         out = {'ids':ids, 'len': len(ids)}
         return out
 class YelpFoodBusinessReviewsDataset:
-    def __init__(self, food_reviews_dataset, data_dir):
+    def __init__(self, data_dir):
         if not os.path.exists(data_dir):
             os.makedirs(data_dir)
-        self.ds = food_reviews_dataset
+        self.ds = load_dataset("hasnat79/yelp_food_business_review_dataset_2M")
         self.data_dir = data_dir
         print(f"loaded dataset with splits: {self.ds.keys()}")
         self.save_to_disk(data_dir)
@@ -57,7 +64,7 @@ class YelpFoodBusinessReviewsDataset:
         if split == 'train':
             data = np.memmap(f"{self.data_dir}/train.bin", dtype=np.uint16, mode='r')
         else:
-            data = np.memmap(f"{self.data_dir}/validation.bin", dtype=np.uint16, mode='r')
+            data = np.memmap(f"{self.data_dir}/test.bin", dtype=np.uint16, mode='r')
         ix = torch.randint(len(data) - block_size, (batch_size,))
         x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
         y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
@@ -90,7 +97,7 @@ if __name__ == "__main__":
 
     # find average length of the reviews
 
-    yelp_food_review_dataset = YelpFoodBusinessReviewsDataset(yelp_food_business_review_dataset_hf, data_dir="../data/yelp_food_business_review_dataset")
+    yelp_food_review_dataset = YelpFoodBusinessReviewsDataset(data_dir="../data/yelp_food_business_review_dataset")
     x, y = yelp_food_review_dataset.get_batch('train', batch_size=1, block_size=128)
 
     print(f"x: {x[0]}")
