@@ -14,16 +14,28 @@ if __name__ == "__main__":
     bias=True
 )
     model = GPT(config)  # re-create the model with same config
-    device =  "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Detect best available device: MPS (Mac GPU) > CUDA > CPU
+    if torch.backends.mps.is_available():
+        device = "mps"
+        print("Using MPS (Mac GPU) for inference.")
+    elif torch.cuda.is_available():
+        device = "cuda"
+        print("Using CUDA for inference.")
+    else:
+        device = "cpu"
+        print("Using CPU for inference.")
+    
     # best_model_params_path = "/scratch/user/hasnat.md.abdullah/TasteSage/tiny_stories_slm/best_model_params_60K_EP.pt"
     # Download the model from HuggingFace
     best_model_params_path = hf_hub_download(repo_id="hasnat79/tiny_stories_gpt2_60k_epoch", 
                                              filename="best_model_params_60K_EP.pt")
     model.load_state_dict(torch.load(best_model_params_path, map_location=torch.device(device))) # load best model states
+    model.to(device)  # Ensure model is on the correct device
 
     sentence = "A little girl went to the woods"
     enc = tiktoken.get_encoding("gpt2")
-    context = (torch.tensor(enc.encode_ordinary(sentence)).unsqueeze(dim = 0))
+    context = (torch.tensor(enc.encode_ordinary(sentence)).unsqueeze(dim = 0)).to(device)
     y = model.generate(context, 200)
     print(enc.decode(y.squeeze().tolist()))
 

@@ -5,8 +5,15 @@ import numpy as np
 from tqdm.auto import tqdm
 import torch
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-device_type = 'cuda' if 'cuda' in device else 'cpu'
+# Detect best available device: MPS (Mac GPU) > CUDA > CPU
+if torch.backends.mps.is_available():
+    device = "mps"
+elif torch.cuda.is_available():
+    device = "cuda"
+else:
+    device = "cpu"
+
+device_type = 'mps' if device == 'mps' else ('cuda' if 'cuda' in device else 'cpu')
 
 def process(example):
     enc = tiktoken.get_encoding("gpt2")

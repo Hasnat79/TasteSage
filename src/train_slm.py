@@ -6,14 +6,15 @@ from torch.optim.lr_scheduler import LinearLR,SequentialLR, CosineAnnealingLR
 from tqdm.auto import tqdm
 
 
-def estimate_loss(model,dataset,eval_iters=500, ctx=nullcontext()):
+def estimate_loss(model,dataset,eval_iters=500, ctx=nullcontext(), device='cpu'):
     out = {}
     model.eval()
     with torch.inference_mode():
         for split in ['train', 'val']:
-            losses = torch.zeros(eval_iters)
+            losses = torch.zeros(eval_iters, device=device)
             for k in range(eval_iters):
                 X, Y = dataset.get_batch(split, batch_size=16, block_size=128)
+                X, Y = X.to(device), Y.to(device)
                 with ctx:
                     logits, loss = model(X, Y)
                 losses[k] = loss.item()
@@ -22,7 +23,17 @@ def estimate_loss(model,dataset,eval_iters=500, ctx=nullcontext()):
     return out
 
 if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Detect best available device: MPS (Mac GPU) > CUDA > CPU
+    if torch.backends.mps.is_available():
+        device = "mps"
+        print("MPS (Mac GPU) is available and will be used.")
+    elif torch.cuda.is_available():
+        device = "cuda"
+        print("CUDA is available and will be used.")
+    else:
+        device = "cpu"
+        print("Using CPU.")
+    
     print(f"Using device: {device}")
     dataset = TinyStoriesDataset()
 
@@ -39,32 +50,38 @@ if __name__ == "__main__":
     model.to(device)
     # training config
 
-    BEST_MODEL_PATH = 'best_model_params_60K_EP.pth'
-    LOSS_FIG_PATH = 'loss_plot_60K_EP.png'
+    
 
 
     learning_rate = 1e-4 #more stable training, earlier 1e-4
-    max_iters = 60000 #increase from 25000
-    warmup_steps = 1000 #smoother initial train, earlier 100
+    max_iters = 101 #increase from 25000
+    warmup_steps = 2 #smoother initial train, earlier 100
     min_lr = 5e-4 #lower rate, earlier 5e-4
-    eval_iters = 500 # increased from 100
-    batch_size = 16 # changed from 16, better gradient estimate
+    eval_iters = 25# increased from 100
+    batch_size = 32 # changed from 16, better gradient estimate
     block_size = 128 #changed from 64, capture longer range dependencies
 
     gradient_accumulation_steps = 32 # reduced from 50
 
-    device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+    BEST_MODEL_PATH = f'best_model_params_{max_iters}_EP.pth'
+    LOSS_FIG_PATH = f'loss_plot_{max_iters}_EP.png'
+
+    device_type = 'mps' if device == 'mps' else ('cuda' if 'cuda' in device else 'cpu') # for later use in torch.autocast
 
     # note: float16 data type will automatically use a GradScaler
-
+    # MPS doesn't support bfloat16, so use float16 for MPS and bfloat16/float16 for CUDA
+    if device == 'mps':
+        dtype = 'float16'  # MPS only supports float16
+    else:
+        dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
+    
     # How to use autocast https://wandb.ai/wandb_fc/tips/reports/How-To-Use-Autocast-in-PyTorch--VmlldzoyMTk4NTky
-    #dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-    dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 
     ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-    torch.set_default_device(device)
+    # Don't set default device for MPS as it can cause allocation issues
+    # torch.set_default_device(device)  # Commented out to fix MPS issues
     torch.manual_seed(42)
 
     # optimizers and schedulers
@@ -76,7 +93,11 @@ if __name__ == "__main__":
     scheduler = SequentialLR(optimizer, schedulers=[scheduler_warmup, scheduler_decay], milestones=[warmup_steps]) #Switching from warmup to decay
 
     # https://stackoverflow.com/questions/72534859/is-gradscaler-necessary-with-mixed-precision-training-with-pytorch
-    scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+    # Use GradScaler only for CUDA with float16, MPS doesn't need GradScaler
+    if device_type == 'cuda':
+        scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+    else:
+        scaler = None  # MPS and CPU don't use GradScaler
 
     # training
 
@@ -89,7 +110,7 @@ if __name__ == "__main__":
     for epoch in tqdm(range(max_iters)):
         if epoch % eval_iters == 0 and epoch != 0:
             # Ensure estimate_loss uses the correct device
-            losses = estimate_loss(model, dataset, eval_iters=eval_iters, ctx=ctx)
+            losses = estimate_loss(model, dataset, eval_iters=eval_iters, ctx=ctx, device=device)
             print(f"Epoch {epoch}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
             print(f"The current learning rate: {optimizer.param_groups[0]['lr']:.5f}")
             train_loss_list += [losses['train']]
@@ -106,23 +127,37 @@ if __name__ == "__main__":
         with ctx:
             logits, loss = model(X, y)
             loss = loss / gradient_accumulation_steps
-            scaler.scale(loss).backward()
+            
+            # Handle gradient scaling based on device
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
         if ((epoch + 1) % gradient_accumulation_steps == 0) or (epoch + 1 == max_iters):
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-            scaler.step(optimizer)
-            scaler.update()
+            
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+                
             optimizer.zero_grad(set_to_none=True)
         scheduler.step()
 
     # plot SLM loss func
     import matplotlib.pyplot as plt
+    print(f"len(train_loss_list) = {len(train_loss_list)}, len(validation_loss_list) = {len(validation_loss_list)}")
     train_loss_list_converted = [i.cpu().detach() for i in train_loss_list]
     validation_loss_list_converted = [i.cpu().detach() for i in validation_loss_list]
 
-    plt.plot(train_loss_list_converted, 'g', label='train_loss')
-    plt.plot(validation_loss_list_converted, 'r', label='validation_loss')
-    plt.xlabel("Steps - Every 100 epochs")
+    # Create x-axis values that show the actual epoch numbers when losses were evaluated
+    x_values = [i * eval_iters for i in range(len(train_loss_list_converted))]
+
+    plt.plot(x_values, train_loss_list_converted, 'g', label='train_loss')
+    plt.plot(x_values, validation_loss_list_converted, 'r', label='validation_loss')
+    plt.xlabel("Total Epochs")
     plt.ylabel("Loss")
     plt.legend()
     plt.savefig(LOSS_FIG_PATH)
