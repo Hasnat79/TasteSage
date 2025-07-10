@@ -1,4 +1,4 @@
-from data_loader import TinyStoriesDataset
+from data_loader import NourishRecipeDataset
 from models import GPTConfig, GPT
 import torch
 from contextlib import nullcontext
@@ -13,7 +13,7 @@ def estimate_loss(model,dataset,eval_iters=500, ctx=nullcontext(), device='cpu')
         for split in ['train', 'val']:
             losses = torch.zeros(eval_iters, device=device)
             for k in range(eval_iters):
-                X, Y = dataset.get_batch(split, batch_size=16, block_size=128)
+                X, Y = dataset.get_batch(split, batch_size=16, block_size=64)
                 X, Y = X.to(device), Y.to(device)
                 with ctx:
                     logits, loss = model(X, Y)
@@ -35,11 +35,11 @@ if __name__ == "__main__":
         print("Using CPU.")
     
     print(f"Using device: {device}")
-    dataset = TinyStoriesDataset()
+    dataset = NourishRecipeDataset("../data/combined_recipes_details.json")
 
     config = GPTConfig(
     vocab_size=50257,     # use the tokenizer's vocab size
-    block_size=128,       # or whatever context size you're training with
+    block_size=64,       # or whatever context size you're training with
     n_layer=6,
     n_head=6,
     n_embd=384,
@@ -54,16 +54,16 @@ if __name__ == "__main__":
 
 
     learning_rate = 1e-4 #more stable training, earlier 1e-4
-    max_iters = 101 #increase from 25000
-    warmup_steps = 2 #smoother initial train, earlier 100
+    max_iters = 10000 #increase from 25000
+    warmup_steps = 100 #smoother initial train, earlier 100
     min_lr = 5e-4 #lower rate, earlier 5e-4
-    eval_iters = 25# increased from 100
-    batch_size = 32 # changed from 16, better gradient estimate
-    block_size = 128 #changed from 64, capture longer range dependencies
+    eval_iters = 500# increased from 100
+    batch_size = 16 # changed from 16, better gradient estimate
+    block_size = 64 #changed from 64, capture longer range dependencies
 
     gradient_accumulation_steps = 32 # reduced from 50
 
-    BEST_MODEL_PATH = f'best_model_params_{max_iters}_EP.pth'
+    BEST_MODEL_PATH = f'best_model_params_{max_iters}_EP.pt'
     LOSS_FIG_PATH = f'loss_plot_{max_iters}_EP.png'
 
     device_type = 'mps' if device == 'mps' else ('cuda' if 'cuda' in device else 'cpu') # for later use in torch.autocast
