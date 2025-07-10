@@ -1,86 +1,110 @@
-from datasets import load_dataset
-import tiktoken 
-import os 
+import os
+import json
 import numpy as np
-from tqdm.auto import tqdm
 import torch
-import json 
+from tqdm.auto import tqdm
+from datasets import load_dataset
+import tiktoken
 
+# ===================== Constants & Configuration ===================== #
 
-# Detect best available device: MPS (Mac GPU) > CUDA > CPU
+# Device selection
 if torch.backends.mps.is_available():
-    device = "mps"
+    DEVICE = "mps"
 elif torch.cuda.is_available():
-    device = "cuda"
+    DEVICE = "cuda"
 else:
-    device = "cpu"
+    DEVICE = "cpu"
 
-device_type = 'mps' if device == 'mps' else ('cuda' if 'cuda' in device else 'cpu')
+DEVICE_TYPE = "mps" if DEVICE == "mps" else ("cuda" if "cuda" in DEVICE else "cpu")
 
-def process(example):
-    enc = tiktoken.get_encoding("gpt2")
-    ids = enc.encode_ordinary(example['text'])  # encode_ordinary ignores any special tokens
-    out = {'ids': ids, 'len': len(ids)}
-    return out
-class TinyStoriesDataset: 
+# Tokenizer configuration
+TOKENIZER_NAME = "gpt2"
+ENCODER = tiktoken.get_encoding(TOKENIZER_NAME)
+
+# Paths and names
+TINYSTORIES_HF_NAME = "roneneldan/TinyStories"
+TINYSTORIES_DATA_DIR = "./tiny_stories_dataset"
+TINYSTORIES_TRAIN_FILE = os.path.join(TINYSTORIES_DATA_DIR, "train.bin")
+TINYSTORIES_VAL_FILE = os.path.join(TINYSTORIES_DATA_DIR, "validation.bin")
+
+NOURISH_DATA_PATH = "../data/combined_recipes_details.json"
+NOURISH_DATA_DIR = "./nourish_recipe_dataset"
+NOURISH_TRAIN_FILE = os.path.join(NOURISH_DATA_DIR, "train.bin")
+NOURISH_VAL_FILE = os.path.join(NOURISH_DATA_DIR, "val.bin")
+
+# Tokenization batching
+NUM_SHARDS = 1024
+NP_DTYPE = np.uint16
+TRAIN_RATIO = 0.8
+RANDOM_SEED = 42
+
+# ===================== Utility Functions ===================== #
+
+def tokenize_text(example):
+    """Tokenize plain text using GPT-2 tokenizer."""
+    token_ids = ENCODER.encode_ordinary(example["text"])
+    return {"ids": token_ids, "len": len(token_ids)}
+
+# ===================== TinyStories Dataset Class ===================== #
+
+class TinyStoriesDataset:
     def __init__(self):
-        self.ds = load_dataset("roneneldan/TinyStories")
-        print(f"Loaded dataset with splits: {self.ds.keys()}")
-        print(type(self.ds))
-        for i in range(len(self.ds['train'])):
-            print(f"Example {i}: {self.ds['train'][i]['text'][:50]}...")
-            break
-        self.train_path = "./tiny_stories_dataset/train.bin"
-        self.validation_path = "./tiny_stories_dataset/validation.bin"
-        self.save_to_disk("./tiny_stories_dataset")
+        self.train_path = TINYSTORIES_TRAIN_FILE
+        self.val_path = TINYSTORIES_VAL_FILE
+        self.dataset = load_dataset(TINYSTORIES_HF_NAME)
+        print(f"Dataset loaded with splits: {self.dataset.keys()}")
 
-    def save_to_disk(self, path):
-        if not os.path.exists(self.train_path):
-            self.tokenized = self.ds.map(
-            process,
-            remove_columns=['text'],
-            desc="tokenizing the splits",
-            num_proc=8,
+        print(f"Sample: {self.dataset['train'][0]['text'][:50]}...\n")
+        self._save_tokenized_data()
+
+    def _save_tokenized_data(self):
+        """Tokenize and save the full TinyStories dataset as binary .bin files."""
+        if os.path.exists(self.train_path) and os.path.exists(self.val_path):
+            print("Tokenized files already exist. Skipping tokenization.")
+            return
+
+        tokenized = self.dataset.map(
+            tokenize_text,
+            remove_columns=["text"],
+            desc="Tokenizing TinyStories dataset",
+            num_proc=8
         )
-            # concatenate all the ids in each dataset into one large file we can use for training
-            for split, dset in self.tokenized.items():
-                arr_len = np.sum(dset['len'], dtype=np.uint64)
-                print(f'Processing split: {split}, total samples: {len(dset)}, total tokens: {arr_len}')
-                filename = f'{path}/{split}.bin'
-                if not os.path.exists(path):
-                    os.makedirs(path)
-                dtype = np.uint16 # (can do since enc.max_token_value == 50256 is < 2**16)
-                arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
-                total_batches = 1024
 
-                idx = 0
-                for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
-                    # Batch together samples for faster write
-                    batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
-                    arr_batch = np.concatenate(batch['ids'])
-                    # Write into mmap
-                    arr[idx : idx + len(arr_batch)] = arr_batch
-                    idx += len(arr_batch)
-                arr.flush()
-    
-    def get_batch(self,split, batch_size=32, block_size=128): 
-        if split == 'train':
-            data = np.memmap(self.train_path, dtype=np.uint16, mode='r')
-        else:
-            data = np.memmap(self.validation_path, dtype=np.uint16, mode='r')
+        os.makedirs(TINYSTORIES_DATA_DIR, exist_ok=True)
+
+        for split, dset in tokenized.items():
+            total_tokens = np.sum(dset["len"], dtype=np.uint64)
+            filename = os.path.join(TINYSTORIES_DATA_DIR, f"{split}.bin")
+            arr = np.memmap(filename, dtype=NP_DTYPE, mode="w+", shape=(total_tokens,))
+            idx = 0
+
+            for batch_idx in tqdm(range(NUM_SHARDS), desc=f"Writing {filename}"):
+                batch = dset.shard(NUM_SHARDS, batch_idx, contiguous=True).with_format("numpy")
+                batch_ids = np.concatenate(batch["ids"])
+                arr[idx:idx+len(batch_ids)] = batch_ids
+                idx += len(batch_ids)
+
+            arr.flush()
+            print(f"{split} split saved with {total_tokens} tokens to {filename}")
+
+    def get_batch(self, split="train", batch_size=32, block_size=128):
+        path = self.train_path if split == "train" else self.val_path
+        data = np.memmap(path, dtype=NP_DTYPE, mode="r")
         ix = torch.randint(len(data) - block_size, (batch_size,))
-        x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-        y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
-        if device_type == 'cuda':
-            # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-            x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
-        else:
-            x, y = x.to(device), y.to(device)
-        return x, y
+        x = torch.stack([torch.from_numpy(data[i:i+block_size].astype(np.int64)) for i in ix])
+        y = torch.stack([torch.from_numpy(data[i+1:i+1+block_size].astype(np.int64)) for i in ix])
+        return self._to_device(x, y)
 
+    def _to_device(self, x, y):
+        if DEVICE_TYPE == "cuda":
+            return x.pin_memory().to(DEVICE, non_blocking=True), y.pin_memory().to(DEVICE, non_blocking=True)
+        return x.to(DEVICE), y.to(DEVICE)
+
+# ===================== Nourish Recipe Dataset Class ===================== #
 
 class NourishRecipeDataset:
-    def __init__(self, data_path):
+    def __init__(self, data_path=NOURISH_DATA_PATH):
         # Define special tokens for recipe schema
         self.special_tokens = {
             '<bos>': 50257,     # Beginning of sequence
@@ -93,51 +117,39 @@ class NourishRecipeDataset:
             '<ans_end>': 50264
         }# unused
         
+        self.train_path = NOURISH_TRAIN_FILE
+        self.val_path = NOURISH_VAL_FILE
+        
         # Create reverse mapping for decoding
         self.id_to_token = {v: k for k, v in self.special_tokens.items()} # unused
+
+
+        with open(data_path, "r") as f:
+            raw_data = json.load(f)
         
-        with open(data_path, 'r') as f:
-            self.ds = json.load(f)
-            print(f"Loaded dataset with {len(self.ds)} recipes.")
+        self.dataset = [r for r in raw_data if self._is_valid(r)]
+        print(f"Loaded {len(self.dataset)} valid recipes.")
+
+        self.text_data = self._format_recipes()
+        self.tokenized_data = [ENCODER.encode_ordinary(t) for t in tqdm(self.text_data, desc="Tokenizing")]
+        self._split_data()
+        self._save_binary_files()
+
+    def _is_valid(self, recipe):
+        required = ["title", "instructions", "safe_for_diabetes"]
+        return all(field in recipe and recipe[field] for field in required)
+
+    def _format_recipes(self):
+        texts = []
+        for recipe in self.dataset:
             
-        # Filter out recipes with missing data
-        self.ds = [recipe for recipe in self.ds if self._is_valid_recipe(recipe)]
-        print(f"After filtering: {len(self.ds)} valid recipes.")
-        
-        # Process recipes into LLM format
-        self.processed_texts = self._process_recipes()
-        print(f"Processed {len(self.processed_texts)} recipe texts.")
-        
-        # Tokenize the processed texts
-        self._tokenize_dataset()
-        
-        # Create train/val split (80/20)
-        self._create_train_val_split()
-        
-        # Save tokenized data to disk
-        self.train_path = "./nourish_recipe_dataset/train.bin"
-        self.validation_path = "./nourish_recipe_dataset/val.bin"
-        self._save_to_disk()
-    
-    def _is_valid_recipe(self, recipe):
-        """Check if a recipe has all required fields"""
-        required_fields = ['title', 'instructions', 'safe_for_diabetes']
-        return all(field in recipe and recipe[field] for field in required_fields)
-    
-    def _process_recipes(self):
-        """Convert recipes to LLM training format using special tokens"""
-        processed_texts = []
-        
-        for recipe in self.ds:
             # Format instructions as a single string
             if isinstance(recipe['instructions'], list):
                 instructions = ' '.join(recipe['instructions'])
             else:
                 instructions = str(recipe['instructions'])
-            
-            # Create the LLM input format with special tokens as placeholders
-            # We'll replace these with actual token IDs during tokenization
-            formatted_text = (
+                
+            text = (
                 f"<bos> "
                 f"<recipe_start> "
                 f"Recipe Name: {recipe['title']} "
@@ -148,93 +160,57 @@ class NourishRecipeDataset:
                 f"<eos> "
             )
             
-            processed_texts.append(formatted_text)
-        
-        return processed_texts
-    
-    def _tokenize_dataset(self):
-        """Tokenize all processed texts"""
-        enc = tiktoken.get_encoding("gpt2")
-        self.tokenized_data = []
-        
-        print("Tokenizing recipes...")
-        for text in tqdm(self.processed_texts, desc="Tokenizing"):
-            ids = enc.encode_ordinary(text)
-            self.tokenized_data.append(ids)
-    
-    def _create_train_val_split(self, train_ratio=0.8):
-        """Create train/validation split"""
-        np.random.seed(42)  # For reproducible splits
-        n_samples = len(self.tokenized_data)
-        indices = np.random.permutation(n_samples)
-        
-        train_size = int(n_samples * train_ratio)
-        train_indices = indices[:train_size]
-        val_indices = indices[train_size:]
-        
-        self.train_data = [self.tokenized_data[i] for i in train_indices]
-        self.val_data = [self.tokenized_data[i] for i in val_indices]
-        
-        print(f"Train samples: {len(self.train_data)}, Val samples: {len(self.val_data)}")
-    
-    def _save_to_disk(self):
-        """Save tokenized data to binary files"""
-        os.makedirs("./nourish_recipe_dataset", exist_ok=True)
-        
-        for split_name, data in [("train", self.train_data), ("val", self.val_data)]:
-            # Concatenate all tokenized sequences
-            all_ids = []
-            for ids in data:
-                all_ids.extend(ids)
-            
-            # Convert to numpy array and save
-            arr = np.array(all_ids, dtype=np.uint16)
-            filename = f"./nourish_recipe_dataset/{split_name}.bin"
-            arr.tofile(filename)
-            
-            print(f"Saved {len(arr)} tokens to {filename}")
-    
-    def get_batch(self, split, batch_size=32, block_size=128):
-        """Get a batch of data for training"""
-        if split == 'train':
-            data = np.memmap(self.train_path, dtype=np.uint16, mode='r')
-        else:
-            data = np.memmap(self.validation_path, dtype=np.uint16, mode='r')
-        
-        # Ensure we don't go out of bounds
-        max_start = len(data) - block_size
-        if max_start <= 0:
-            raise ValueError(f"Dataset too small. Data length: {len(data)}, block_size: {block_size}")
-        
-        ix = torch.randint(max_start, (batch_size,))
-        x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-        y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
-        
-        if device_type == 'cuda':
-            x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
-        else:
-            x, y = x.to(device), y.to(device)
-        
-        return x, y
+            texts.append(text)
+        return texts
 
+    def _split_data(self):
+        np.random.seed(RANDOM_SEED)
+        indices = np.random.permutation(len(self.tokenized_data))
+        train_size = int(len(indices) * TRAIN_RATIO)
+        self.train_data = [self.tokenized_data[i] for i in indices[:train_size]]
+        self.val_data = [self.tokenized_data[i] for i in indices[train_size:]]
+        print(f"Train: {len(self.train_data)}, Val: {len(self.val_data)}")
+
+    def _save_binary_files(self):
+        os.makedirs(NOURISH_DATA_DIR, exist_ok=True)
+        for split, data in [("train", self.train_data), ("val", self.val_data)]:
+            flat_ids = np.array([id for seq in data for id in seq], dtype=NP_DTYPE)
+            path = os.path.join(NOURISH_DATA_DIR, f"{split}.bin")
+            flat_ids.tofile(path)
+            print(f"Saved {len(flat_ids)} tokens to {path}")
+
+    def get_batch(self, split="train", batch_size=32, block_size=128):
+        path = self.train_path if split == "train" else self.val_path
+        data = np.memmap(path, dtype=NP_DTYPE, mode="r")
+        if len(data) <= block_size:
+            raise ValueError(f"Data too short for block size: {len(data)} < {block_size}")
+        ix = torch.randint(len(data) - block_size, (batch_size,))
+        x = torch.stack([torch.from_numpy(data[i:i+block_size].astype(np.int64)) for i in ix])
+        y = torch.stack([torch.from_numpy(data[i+1:i+1+block_size].astype(np.int64)) for i in ix])
+        return self._to_device(x, y)
+
+    def _to_device(self, x, y):
+        if DEVICE_TYPE == "cuda":
+            return x.pin_memory().to(DEVICE, non_blocking=True), y.pin_memory().to(DEVICE, non_blocking=True)
+        return x.to(DEVICE), y.to(DEVICE)
+
+# ===================== Main (Test Entry Point) ===================== #
 
 if __name__ == "__main__":
-    # Test the NourishRecipeDataset
-    dataset = NourishRecipeDataset(data_path="../data/combined_recipes_details.json")
+    print(f"Using device: {DEVICE.upper()}")
     
-    # Test getting a batch
-    try:
-        x, y = dataset.get_batch('train', batch_size=4, block_size=64)
-        print(f"Training batch - x shape: {x.shape}, y shape: {y.shape}")
-        
-        x_val, y_val = dataset.get_batch('val', batch_size=4, block_size=64)
-        print(f"Validation batch - x shape: {x_val.shape}, y shape: {y_val.shape}")
-        
-        # Decode a sample to verify format
-        enc = tiktoken.get_encoding("gpt2")
-        sample_text = enc.decode(x[0].tolist())
-        print(f"\nSample decoded text:\n{sample_text}")
-        
-    except Exception as e:
-        print(f"Error getting batch: {e}")
-        print("This might happen if the dataset is too small for the block size.")
+    # # Test TinyStories
+    # print("\n--- Testing TinyStoriesDataset ---")
+    # tiny_dataset = TinyStoriesDataset()
+    # x, y = tiny_dataset.get_batch("train", batch_size=4, block_size=64)
+    # print(f"TinyStories batch - x: {x.shape}, y: {y.shape}")
+    
+    # Test NourishRecipes
+    print("\n--- Testing NourishRecipeDataset ---")
+    nourish_dataset = NourishRecipeDataset()
+    x, y = nourish_dataset.get_batch("train", batch_size=4, block_size=64)
+    print(f"Nourish batch - x: {x.shape}, y: {y.shape}")
+    
+    sample_decoded = ENCODER.decode(x[0].tolist())
+    print("\nSample decoded text:\n", sample_decoded)
+    print("\nDone with data loading tests.")

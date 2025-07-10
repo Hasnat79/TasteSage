@@ -1,0 +1,23 @@
+# config.yaml
+# Model architecture
+vocab_size: 50257
+block_size: 128
+num_layers: 6
+num_heads: 6
+embedding_dim: 384
+dropout: 0.1
+
+# Training parameters
+max_iters: 101
+eval_interval: 25
+batch_size: 32
+learning_rate: 1e-4
+min_lr: 5e-4
+warmup_steps: 2
+grad_accum_steps: 32
+weight_decay: 0.1
+seed: 42
+
+# File paths
+loss_plot_path: loss_plot.png
+best_model_path: best_model.pth
