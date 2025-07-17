@@ -106,17 +106,30 @@ class TinyStoriesDataset:
 class NourishRecipeDataset:
     def __init__(self, data_path=NOURISH_DATA_PATH):
         # Define special tokens for recipe schema
-        self.special_tokens = {
-            '<bos>': 50257,     # Beginning of sequence
-            '<eos>': 50258,     # End of sequence  
-            '<recipe_start>': 50259,
-            '<recipe_end>': 50260,
-            '<q_start>': 50261,
-            '<q_end>': 50262,
-            '<ans_start>': 50263,
-            '<ans_end>': 50264
-        }# unused
+        # self.special_tokens = {
+        #     '<bos>': 50257,     # Beginning of sequence
+        #     '<eos>': 50258,     # End of sequence  
+        #     '<recipe_start>': 50259,
+        #     '<recipe_end>': 50260,
+        #     '<q_start>': 50261,
+        #     '<q_end>': 50262,
+        #     '<ans_start>': 50263,
+        #     '<ans_end>': 50264
+        # }# unused
         
+        # --------------- Special tokens for GPT-2 tokenizer --------------- #
+        special_tokens = ['<bos>', '<eos>', '<recipe_start>', '<recipe_end>', 
+                  '<q_start>', '<q_end>', '<ans_start>', '<ans_end>']
+
+        # Register with tokenizer
+        ENCODER.add_special_tokens({'additional_special_tokens': special_tokens})
+
+        # Update special token dict with  actual IDs
+        self.special_tokens = {tok: ENCODER.convert_tokens_to_ids(tok) for tok in special_tokens}
+        self.id_to_token = {v: k for k, v in self.special_tokens.items()}
+
+        # Paths for train and validation data
+
         self.train_path = NOURISH_TRAIN_FILE
         self.val_path = NOURISH_VAL_FILE
         
